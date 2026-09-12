@@ -1,0 +1,67 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function ownsUid() {
+      return request.auth.uid == resource.data.uid
+          || request.auth.uid == request.resource.data.uid;
+    }
+
+    match /users/{uid} {
+      allow read, write: if isAuthenticated() && request.auth.uid == uid;
+    }
+
+    match /materials/{materialId} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /subjects/{subjectId} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /topics/{topicId} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /roadmaps/{roadmapId} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /studyTasks/{taskId} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /tests/{testId} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /progress/{progressId} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /extractedQuestions/{qid} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /notesAnalysis/{nid} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /activities/{aid} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /chatMessages/{mid} {
+      allow read, write: if isAuthenticated() && ownsUid();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
