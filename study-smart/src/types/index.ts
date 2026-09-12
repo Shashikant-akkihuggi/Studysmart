@@ -21,20 +21,26 @@ export type MaterialCategory =
   | "assignment"
   | "other";
 
-export type MaterialStatus = "uploading" | "analyzing" | "completed" | "failed";
+export type MaterialStatus = "uploading" | "uploaded" | "processing" | "ready" | "failed";
 
 export type Material = {
   id: string;
+  uid: string;
   name: string;
+  originalFilename: string;
   category: MaterialCategory;
   type: string;
+  mimeType: string;
   size: number;
-  uploadDate: Date;
-  status: MaterialStatus;
   subject?: string;
-  uid: string;
-  b2FileId?: string;
-  b2Bucket?: string;
+  subjectId: string;
+  status: MaterialStatus;
+  b2Bucket: string;
+  b2ObjectKey: string;
+  uploadDate: Date;
+  createdAt: Date;
+  updatedAt: Date;
+  errorMessage?: string;
 };
 
 export type TopicPriority = "high" | "medium" | "low";

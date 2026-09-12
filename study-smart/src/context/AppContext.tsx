@@ -16,6 +16,7 @@ import type {
   ChatMessage,
   ExtractedQuestion,
   Material,
+  MaterialStatus,
   Progress,
   StudyPlan,
   SubjectNotes,
@@ -115,8 +116,9 @@ interface AppState {
   skipOnboarding: () => void;
 
   materials: Material[];
-  addMaterial: (m: Omit<Material, "id" | "uploadDate" | "status" | "uid">) => void;
-  removeMaterial: (id: string) => void;
+  addMaterial: (m: Omit<Material, "id" | "uploadDate" | "status" | "uid" | "createdAt" | "updatedAt" | "b2Bucket" | "b2ObjectKey">) => Promise<string | null>;
+  updateMaterialStatus: (materialId: string, updates: { status?: MaterialStatus; b2Bucket?: string; b2ObjectKey?: string; errorMessage?: string }) => Promise<void>;
+  removeMaterial: (id: string) => Promise<void>;
   processingSteps: AnalysisStep[];
   resetProcessingSteps: () => void;
 
@@ -708,33 +710,147 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const addMaterial = useCallback(
-    (m: Omit<Material, "id" | "uploadDate" | "status" | "uid">) => {
-      if (!user) return;
-      const nm: Material = {
+    async (m: Omit<Material, "id" | "uploadDate" | "status" | "uid" | "createdAt" | "updatedAt" | "b2Bucket" | "b2ObjectKey">) => {
+      if (!user) return null;
+
+      const materialId = uid();
+      const now = new Date();
+
+      const newMaterial: Material = {
         ...m,
-        id: uid(),
+        id: materialId,
         uid: user.uid,
-        uploadDate: new Date(),
+        uploadDate: now,
+        createdAt: now,
+        updatedAt: now,
         status: "uploading",
+        b2Bucket: "", // Will be set after successful upload
+        b2ObjectKey: "", // Will be set after successful upload
       };
-      setMaterials((prev) => [nm, ...prev]);
-      setTimeout(() => {
-        setMaterials((prev) =>
-          prev.map((x) => (x.id === nm.id ? { ...x, status: "analyzing" } : x))
-        );
-      }, 1000);
-      setTimeout(() => {
-        setMaterials((prev) =>
-          prev.map((x) => (x.id === nm.id ? { ...x, status: "completed" } : x))
-        );
-      }, 3500);
+
+      // Optimistically add to local state
+      setMaterials((prev) => [newMaterial, ...prev]);
+
+      return materialId;
     },
     [user]
   );
 
-  const removeMaterial = useCallback((id: string) => {
-    setMaterials((prev) => prev.filter((m) => m.id !== id));
-  }, []);
+  const updateMaterialStatus = useCallback(
+    async (
+      materialId: string,
+      updates: {
+        status?: MaterialStatus;
+        b2Bucket?: string;
+        b2ObjectKey?: string;
+        errorMessage?: string;
+      }
+    ) => {
+      if (!user) return;
+
+      try {
+        const materialRef = doc(db, "materials", materialId);
+        const updateData: any = {
+          ...updates,
+          updatedAt: serverTimestamp(),
+        };
+
+        await setDoc(materialRef, updateData, { merge: true });
+
+        // Update local state
+        setMaterials((prev) =>
+          prev.map((m) =>
+            m.id === materialId
+              ? { ...m, ...updates, updatedAt: new Date() }
+              : m
+          )
+        );
+      } catch (error) {
+        console.error("Failed to update material:", error);
+        // Update local state with error
+        setMaterials((prev) =>
+          prev.map((m) =>
+            m.id === materialId
+              ? { ...m, status: "failed" as MaterialStatus, errorMessage: "Update failed" }
+              : m
+          )
+        );
+      }
+    },
+    [user]
+  );
+
+  const removeMaterial = useCallback(
+    async (id: string) => {
+      if (!user) return;
+
+      try {
+        // Optimistically remove from local state
+        setMaterials((prev) => prev.filter((m) => m.id !== id));
+
+        // Delete from Firestore
+        const materialRef = doc(db, "materials", id);
+        await deleteDoc(materialRef);
+      } catch (error) {
+        console.error("Failed to delete material:", error);
+        // TODO: Restore material to local state if needed
+      }
+    },
+    [user]
+  );
+
+  // Load materials from Firestore when user changes
+  useEffect(() => {
+    if (!user) {
+      setMaterials([]);
+      return;
+    }
+
+    const materialsQuery = query(
+      collection(db, "materials"),
+      where("uid", "==", user.uid)
+    );
+
+    const unsubscribe = onSnapshot(
+      materialsQuery,
+      (snapshot) => {
+        const loadedMaterials = snapshot.docs.map((doc) => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            uid: data.uid,
+            name: data.name,
+            originalFilename: data.originalFilename,
+            category: data.category,
+            type: data.type,
+            mimeType: data.mimeType,
+            size: data.size,
+            subject: data.subject,
+            subjectId: data.subjectId,
+            status: data.status,
+            b2Bucket: data.b2Bucket,
+            b2ObjectKey: data.b2ObjectKey,
+            uploadDate: data.uploadDate?.toDate?.() || new Date(data.uploadDate),
+            createdAt: data.createdAt?.toDate?.() || new Date(data.createdAt),
+            updatedAt: data.updatedAt?.toDate?.() || new Date(data.updatedAt),
+            errorMessage: data.errorMessage,
+          } as Material;
+        });
+
+        // Sort by upload date (newest first)
+        loadedMaterials.sort(
+          (a, b) => b.uploadDate.getTime() - a.uploadDate.getTime()
+        );
+
+        setMaterials(loadedMaterials);
+      },
+      (error) => {
+        console.error("Failed to load materials:", error);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user]);
 
   const resetProcessingSteps = useCallback(() => {
     const initial: AnalysisStep[] = [
@@ -1002,6 +1118,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       skipOnboarding,
       materials,
       addMaterial,
+      updateMaterialStatus,
       removeMaterial,
       processingSteps,
       resetProcessingSteps,
@@ -1039,6 +1156,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       skipOnboarding,
       materials,
       addMaterial,
+      updateMaterialStatus,
       removeMaterial,
       processingSteps,
       resetProcessingSteps,

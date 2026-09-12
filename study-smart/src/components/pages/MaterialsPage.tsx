@@ -16,11 +16,15 @@ import {
   FolderKanban,
   MoreHorizontal,
   FileType,
+  AlertCircle,
 } from "lucide-react";
 import { useApp } from "@/context/AppContext";
 import type { MaterialCategory } from "@/types";
-import { StatusBadge, DemoBadge } from "@/components/ui/Badge";
+import { StatusBadge } from "@/components/ui/Badge";
 import { cn, formatDate } from "@/lib/utils";
+import { uploadFile, validateFile } from "@/lib/upload";
+import { doc, setDoc, serverTimestamp } from "@/lib/firebase";
+import { db } from "@/lib/firebase";
 
 const CATEGORIES: { key: MaterialCategory; label: string; icon: React.ReactNode; hint: string }[] = [
   { key: "notes", label: "Notes", icon: <Book size={16} />, hint: "Class notes, handwritten, typed" },
@@ -58,24 +62,112 @@ function formatSize(bytes: number) {
 }
 
 export default function MaterialsPage() {
-  const { materials, addMaterial, removeMaterial, setNav, resetProcessingSteps } = useApp();
+  const { materials, addMaterial, updateMaterialStatus, removeMaterial, setNav, resetProcessingSteps } = useApp();
   const [drag, setDrag] = React.useState(false);
   const [category, setCategory] = React.useState<MaterialCategory>("notes");
   const [subject, setSubject] = React.useState("Theory of Computation");
   const [filter, setFilter] = React.useState<"all" | MaterialCategory>("all");
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
+  const [uploading, setUploading] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 
-  const onFiles = (list: FileList | null) => {
-    if (!list) return;
-    Array.from(list).forEach((f) => {
-      addMaterial({
-        name: f.name,
-        category,
-        type: fileTypeOf(f.name),
-        size: f.size,
-        subject,
-      });
-    });
+  const onFiles = async (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+
+    setUploadError(null);
+    setUploading(true);
+
+    try {
+      // Process files sequentially to avoid overwhelming the system
+      for (const file of Array.from(list)) {
+        // Validate file
+        const validation = validateFile(file);
+        if (!validation.valid) {
+          setUploadError(validation.error || "Invalid file");
+          continue;
+        }
+
+        // Generate subjectId (simple sanitized version for now)
+        const subjectId = subject.toLowerCase().replace(/\s+/g, "-");
+
+        // Create material metadata optimistically
+        const materialId = await addMaterial({
+          name: file.name,
+          originalFilename: file.name,
+          category,
+          type: fileTypeOf(file.name),
+          mimeType: file.type,
+          size: file.size,
+          subject,
+          subjectId,
+        });
+
+        if (!materialId) {
+          setUploadError("Failed to create material. Please sign in.");
+          continue;
+        }
+
+        // Upload file to B2
+        const uploadResult = await uploadFile({
+          file,
+          category,
+          subjectId,
+          onProgress: (progress) => {
+            console.log(`Upload progress for ${file.name}: ${progress}%`);
+          },
+        });
+
+        if (!uploadResult.success) {
+          // Update material status to failed
+          await updateMaterialStatus(materialId, {
+            status: "failed",
+            errorMessage: uploadResult.error || "Upload failed",
+          });
+          setUploadError(uploadResult.error || "Upload failed");
+          continue;
+        }
+
+        // Write material metadata to Firestore
+        try {
+          const materialRef = doc(db, "materials", materialId);
+          await setDoc(materialRef, {
+            id: materialId,
+            name: file.name,
+            originalFilename: file.name,
+            category,
+            type: fileTypeOf(file.name),
+            mimeType: file.type,
+            size: file.size,
+            subject,
+            subjectId,
+            b2Bucket: uploadResult.b2Bucket,
+            b2ObjectKey: uploadResult.objectKey,
+            status: "uploaded",
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+
+          // Update local state
+          await updateMaterialStatus(materialId, {
+            status: "uploaded",
+            b2Bucket: uploadResult.b2Bucket,
+            b2ObjectKey: uploadResult.objectKey,
+          });
+        } catch (firestoreError: any) {
+          console.error("Failed to write Firestore metadata:", firestoreError);
+          await updateMaterialStatus(materialId, {
+            status: "failed",
+            errorMessage: "Failed to save metadata",
+          });
+          setUploadError("Failed to save file metadata");
+        }
+      }
+    } catch (error: any) {
+      console.error("Upload error:", error);
+      setUploadError(error.message || "Upload failed");
+    } finally {
+      setUploading(false);
+    }
   };
 
   const filtered = filter === "all" ? materials : materials.filter((m) => m.category === filter);
@@ -94,12 +186,9 @@ export default function MaterialsPage() {
     <div className="mx-auto max-w-7xl space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-              Study Materials
-            </h1>
-            <DemoBadge />
-          </div>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+            Study Materials
+          </h1>
           <p className="mt-1 text-sm text-slate-500">
             Upload notes, question papers, syllabus, and more. The AI will analyze
             everything together.
@@ -115,6 +204,22 @@ export default function MaterialsPage() {
           </button>
         </div>
       </div>
+
+      {uploadError && (
+        <div className="flex items-start gap-3 rounded-2xl border border-danger-200 bg-danger-50 p-4">
+          <AlertCircle size={20} className="mt-0.5 flex-none text-danger-600" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-danger-900">Upload Error</p>
+            <p className="mt-1 text-sm text-danger-700">{uploadError}</p>
+          </div>
+          <button
+            onClick={() => setUploadError(null)}
+            className="flex-none rounded-lg p-1 text-danger-600 hover:bg-danger-100"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-4 lg:grid-cols-7">
         <button

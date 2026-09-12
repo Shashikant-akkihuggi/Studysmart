@@ -33,16 +33,22 @@ export function PriorityBadge({
 }
 
 export function StatusBadge({ status }: { status: string }) {
-  if (status === "completed")
+  if (status === "ready" || status === "completed")
     return (
       <span className="badge bg-success-50 text-success-600">
-        <span className="mr-1">✓</span> Completed
+        <span className="mr-1">✓</span> Ready
       </span>
     );
-  if (status === "analyzing")
+  if (status === "uploaded")
+    return (
+      <span className="badge bg-success-50 text-success-600">
+        <span className="mr-1">✓</span> Uploaded
+      </span>
+    );
+  if (status === "processing" || status === "analyzing")
     return (
       <span className="badge bg-primary-50 text-primary-700">
-        <span className="mr-1 inline-block animate-spin">◌</span> Analyzing…
+        <span className="mr-1 inline-block animate-spin">◌</span> Processing…
       </span>
     );
   if (status === "uploading")
