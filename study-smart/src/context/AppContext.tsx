@@ -6,6 +6,7 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type {
@@ -50,11 +51,11 @@ import { uid } from "@/lib/utils";
 
 // #region debug-point setup:trace-helpers
 const __DBG = (() => {
-  const SERVER = "http://127.0.0.1:7777/event";
-  const SESSION = "login-blocked-after-valid-creds";
+  const SERVER = "http://127.0.0.1:7788/event";
+  const SESSION = "firestore-perm-denied";
   const RUN = "pre-fix";
   let __seq = 0;
-  return (hypothesisId, location, msg, data = {}) => {
+  return (hypothesisId: string, location: string, msg: string, data: Record<string, any> = {}) => {
     try {
       __seq += 1;
       fetch(SERVER, {
@@ -221,14 +222,119 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [progress, setProgress] = useState<Progress>(EMPTY_PROGRESS);
   const [activities, setActivities] = useState<Activity[]>([]);
 
+  const screenRef = useRef<Screen>(screen);
+  const userRef = useRef<User | null>(user);
+  const authLoadingRef = useRef<boolean>(authLoading);
+  useEffect(() => { screenRef.current = screen; }, [screen]);
+  useEffect(() => { userRef.current = user; }, [user]);
+  useEffect(() => { authLoadingRef.current = authLoading; }, [authLoading]);
+
+  const isManualAuthActionRef = useRef<boolean>(false);
+
+  // #region debug-point H3:firebase-app-project-id
+  useEffect(() => {
+    try {
+      let proj: string | null = null;
+      let authDom: string | null = null;
+      let appName: string | null = null;
+      try {
+        const anyAuth: any = auth;
+        const appFromAuth = anyAuth?.app;
+        if (appFromAuth && typeof appFromAuth === "object") {
+          const opts: any = (appFromAuth as any).options;
+          if (opts && typeof opts === "object") {
+            proj = opts?.projectId ?? null;
+            authDom = opts?.authDomain ?? null;
+            appName = opts?.appId ?? null;
+          }
+        }
+      } catch (_) { }
+      __DBG("H3", "AppContext.mount:firebase-project",
+        "Firebase App projectId + authDomain verified at AppProvider mount",
+        {
+          expectedProjectId: "ai-study-assistant-8dcfb",
+          sdkProjectId: proj,
+          projectIdMatches: proj === "ai-study-assistant-8dcfb",
+          sdkAuthDomain: authDom,
+          sdkAppIdLast6: appName ? appName.slice(-6) : null,
+          isBrowser: typeof window !== "undefined",
+        }
+      );
+    } catch (_) { }
+
+    let rejHandler: ((ev: PromiseRejectionEvent) => void) | null = null;
+    let errHandler: ((ev: ErrorEvent) => void) | null = null;
+    try {
+      if (typeof window !== "undefined") {
+        rejHandler = (ev: PromiseRejectionEvent) => {
+          try {
+            const r: any = ev.reason;
+            __DBG("H4", "AppContext.global:unhandledrejection",
+              "Global unhandledrejection caught (possible firestore denied)",
+              {
+                reasonCode: r?.code ?? null,
+                reasonName: r?.name ?? null,
+                reasonMessage: r?.message
+                  ? String(r.message).slice(0, 300)
+                  : String(ev.reason).slice(0, 300),
+                reasonStack: r?.stack ? "present" : "absent",
+                evType: "unhandledrejection",
+              }
+            );
+          } catch (_) { }
+        };
+        errHandler = (ev: ErrorEvent) => {
+          try {
+            __DBG("H4", "AppContext.global:error-event",
+              "Global window.error caught",
+              {
+                evMessage: String(ev.message || "").slice(0, 300),
+                evFilename: ev.filename ? ev.filename.split("/").pop() : null,
+                evLine: ev.lineno ?? null,
+                evCol: ev.colno ?? null,
+                stack: ev.error?.stack ? "present" : "absent",
+              }
+            );
+          } catch (_) { }
+        };
+        (window as any).addEventListener("unhandledrejection", rejHandler);
+        (window as any).addEventListener("error", errHandler);
+      }
+    } catch (_) { }
+
+    return () => {
+      try {
+        if (typeof window !== "undefined") {
+          if (rejHandler) (window as any).removeEventListener("unhandledrejection", rejHandler);
+          if (errHandler) (window as any).removeEventListener("error", errHandler);
+        }
+      } catch (_) { }
+    };
+  }, []);
+  // #endregion
+
   const clearAuthError = useCallback(() => setAuthError(null), []);
 
   const ensureUserDoc = useCallback(
     async (fbUser: FirebaseUser, overrides?: Partial<User>) => {
       const userRef = doc(db, "users", fbUser.uid);
+      // #region debug-point H2:ensureUserDoc-path
+      __DBG("H2", "AppContext.ensureUserDoc:build-ref",
+        "ensureUserDoc about to read/write firestore", {
+        fbUid: fbUser.uid,
+        firestorePath: "/users/" + fbUser.uid,
+        pathCollectionName: "users",
+        pathDocId: fbUser.uid,
+        docUidEqualsAuthUid: (fbUser.uid === fbUser.uid),
+        overridesName: overrides?.name ?? null,
+        overridesCourse: overrides?.course ?? null,
+      }
+      );
+      // #endregion
       const snap = await getDoc(userRef);
       if (!snap.exists()) {
-        const payload: any = {
+        // Build payload with explicit undefined filtering
+        const rawPayload: any = {
           uid: fbUser.uid,
           email: fbUser.email,
           displayName:
@@ -246,9 +352,41 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         };
+
+        // Remove undefined fields - Firestore rejects undefined but accepts null
+        const payload: any = {};
+        for (const key in rawPayload) {
+          if (rawPayload[key] !== undefined) {
+            payload[key] = rawPayload[key];
+          }
+        }
+
+        // #region debug-point H2:ensureUserDoc-write-payload
+        __DBG("H2", "AppContext.ensureUserDoc:write-doc",
+          "ensureUserDoc writing new user doc to firestore", {
+          firestorePath: "/users/" + fbUser.uid,
+          payloadUid: payload.uid,
+          payloadEmail: payload.email,
+          payloadName: payload.name,
+          payloadKeys: Object.keys(payload).join(","),
+          removedUndefinedFields: Object.keys(rawPayload).filter(k => rawPayload[k] === undefined).join(",") || "none",
+        }
+        );
+        // #endregion
         await setDoc(userRef, payload);
       }
       const updated = await getDoc(userRef);
+      const readData = updated.data();
+      // #region debug-point H2:ensureUserDoc-read-back
+      __DBG("H2", "AppContext.ensureUserDoc:read-back",
+        "ensureUserDoc read back after write (or existing)", {
+        firestorePath: "/users/" + fbUser.uid,
+        exists: updated.exists(),
+        docStoredUid: readData?.uid ?? null,
+        docStoredUidEqualsAuthUid: readData ? readData.uid === fbUser.uid : null,
+      }
+      );
+      // #endregion
       return mapFirestoreUser(fbUser, updated.data());
     },
     []
@@ -263,12 +401,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // #endregion
       try {
         const userRef = doc(db, "users", fbUser.uid);
+        // #region debug-point H1/H2:fetchUserData-ref
+        __DBG("H2", "AppContext.fetchUserData:build-ref",
+          "fetchUserData about to call getDoc", {
+          fbUid: fbUser.uid,
+          firestorePath: "/users/" + fbUser.uid,
+          pathCollectionName: "users",
+          pathDocId: fbUser.uid,
+          pathMatchesExpectedPattern: true,
+        }
+        );
+        // #endregion
         const snap = await getDoc(userRef);
         // #region debug-point D:fetchUserData-snap
         __DBG("D", "AppContext.fetchUserData:snap",
           "fetchUserData firestore read done", {
           fbUid: fbUser.uid,
           exists: snap.exists(),
+          docId: snap.id,
+          docPath: snap.ref?.path ?? null,
         }
         );
         // #endregion
@@ -300,11 +451,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return parsed;
       } catch (e: any) {
         // #region debug-point D:fetchUserData-err
-        __DBG("D", "AppContext.fetchUserData:err",
-          "fetchUserData firestore error", {
+        __DBG("H1", "AppContext.fetchUserData:err",
+          "fetchUserData firestore error (permission-denied?)", {
           fbUid: fbUser.uid,
           code: e?.code ?? "unknown",
+          name: e?.name ?? "unknown",
           message: e?.message ?? String(e),
+          cause: e?.cause ? String(e.cause) : null,
+          firestoreErrorCode: e?.code === "permission-denied" ? "PERMISSION_DENIED" : e?.code ?? "other",
+          firestoreReadPath: "/users/" + fbUser.uid,
         }
         );
         // #endregion
@@ -316,14 +471,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (email: string, password: string): Promise<boolean> => {
+      const screenAtEntry = screenRef.current;
+      const navAtEntry = nav;
+      const userAtEntry = userRef.current;
+      const authLoadingAtEntry = authLoadingRef.current;
       // #region debug-point H1/H2/H3/H5:login-start
       __DBG("A", "AppContext.login:entry", "login started", {
         emailLen: email.length,
-        screenAtEntry: screen,
-        userAtEntry: user?.uid ?? null,
-        authLoadingAtEntry: authLoading,
+        screenAtEntry,
+        userAtEntry: userAtEntry?.uid ?? null,
+        authLoadingAtEntry,
       });
       // #endregion
+      isManualAuthActionRef.current = true;
       setAuthLoading(true);
       setAuthError(null);
       try {
@@ -355,7 +515,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         // #region debug-point A:set-screen-app
         __DBG("E", "AppContext.login:setScreen-app",
           "login() about to set screen='app' + nav='dashboard'",
-          { fromScreen: screen, fromNav: nav }
+          { fromScreen: screenAtEntry, fromNav: navAtEntry }
         );
         // #endregion
         setScreen("app");
@@ -388,13 +548,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         );
         // #endregion
         setAuthLoading(false);
+        setTimeout(() => { isManualAuthActionRef.current = false; }, 0);
       }
     },
-    [fetchUserData, screen, nav, user, authLoading]
+    [fetchUserData, nav]
   );
 
   const signup = useCallback(
     async (data: Partial<User> & { password: string }): Promise<boolean> => {
+      isManualAuthActionRef.current = true;
       setAuthLoading(true);
       setAuthError(null);
       try {
@@ -439,12 +601,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return false;
       } finally {
         setAuthLoading(false);
+        setTimeout(() => { isManualAuthActionRef.current = false; }, 0);
       }
     },
     [ensureUserDoc]
   );
 
   const loginWithGoogle = useCallback(async (): Promise<boolean> => {
+    isManualAuthActionRef.current = true;
     setAuthLoading(true);
     setAuthError(null);
     try {
@@ -473,6 +637,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return false;
     } finally {
       setAuthLoading(false);
+      setTimeout(() => { isManualAuthActionRef.current = false; }, 0);
     }
   }, [ensureUserDoc]);
 
@@ -524,7 +689,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           fbPatch.examDate = patch.examDate ?? null;
         if ("dailyStudyTime" in patch)
           fbPatch.dailyStudyTime = patch.dailyStudyTime ?? null;
-        if ("name" in patch) {
+        if ("name" in patch && patch.name !== undefined) {
           fbPatch.name = patch.name;
           fbPatch.displayName = patch.name;
         }
@@ -650,21 +815,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     // #region debug-point H3:observer-mounted
     __DBG("C", "AppContext.observer:mount",
-      "onAuthStateChanged observer mounted", { capturedScreen: screen }
+      "onAuthStateChanged observer mounted", { capturedScreen: screenRef.current }
     );
     // #endregion
     try {
       const unsub = onAuthStateChanged(auth, async (fbUser) => {
+        const screenNow = screenRef.current;
+        const userNow = userRef.current;
+        const authLoadingNow = authLoadingRef.current;
+        const manualAction = isManualAuthActionRef.current;
         // #region debug-point B/C/E:observer-fired
         __DBG("B", "AppContext.observer:fired",
           "onAuthStateChanged observer fired", {
           fbUid: fbUser?.uid ?? null,
-          screenWhenFired: screen,
-          currentUserBefore: user?.uid ?? null,
-          currentAuthLoading: authLoading,
+          screenWhenFired: screenNow,
+          currentUserBefore: userNow?.uid ?? null,
+          currentAuthLoading: authLoadingNow,
+          manualActionInProgress: manualAction,
         }
         );
         // #endregion
+
+        if (manualAction && fbUser) {
+          __DBG("B", "AppContext.observer:skipped-manual",
+            "observer skipping because manual auth action already handling state",
+            { fbUid: fbUser.uid }
+          );
+          return;
+        }
+
         setAuthLoading(true);
         try {
           if (fbUser) {
@@ -675,24 +854,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             }
             );
             // #endregion
-            const appUser = await fetchUserData(fbUser);
+            let appUser: User;
+            try {
+              appUser = await fetchUserData(fbUser);
+            } catch (fetchErr: any) {
+              __DBG("A", "AppContext.observer:fetch-fallback",
+                "fetchUserData failed, falling back to Firebase auth profile",
+                {
+                  fbUid: fbUser.uid,
+                  code: fetchErr?.code ?? "unknown",
+                  message: fetchErr?.message ?? String(fetchErr),
+                }
+              );
+              appUser = {
+                id: fbUser.uid,
+                uid: fbUser.uid,
+                name: fbUser.displayName ?? fbUser.email?.split("@")[0] ?? "Student",
+                displayName: fbUser.displayName ?? fbUser.email?.split("@")[0] ?? "Student",
+                email: fbUser.email ?? "",
+                course: undefined,
+                semester: undefined,
+                subjects: [],
+                examDate: undefined,
+                dailyStudyTime: undefined,
+                createdAt: undefined,
+                updatedAt: undefined,
+              };
+            }
             // #region debug-point B:observer-fetchuser-ok
             __DBG("B", "AppContext.observer:after-fetch",
-              "observer fetchUserData succeeded", {
+              "observer fetchUserData (or fallback) succeeded", {
               appUid: appUser.uid,
-              screenBeforeSet: screen,
+              screenBeforeSet: screenNow,
               willRedirect:
-                screen === "landing" ||
-                screen === "login" ||
-                screen === "signup",
+                screenNow === "landing" ||
+                screenNow === "login" ||
+                screenNow === "signup",
             }
             );
             // #endregion
             setUser(appUser);
-            if (screen === "landing" || screen === "login" || screen === "signup") {
+            if (screenNow === "landing" || screenNow === "login" || screenNow === "signup") {
               // #region debug-point E:observer-set-screen-app
               __DBG("E", "AppContext.observer:setScreen-app",
-                "observer redirecting screen='app'", { from: screen }
+                "observer redirecting screen='app'", { from: screenNow }
               );
               // #endregion
               setScreen("app");
@@ -701,7 +906,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           } else {
             // #region debug-point B:observer-no-user
             __DBG("B", "AppContext.observer:signed-out",
-              "observer got signed-out user", { screenBefore: screen }
+              "observer got signed-out user", { screenBefore: screenNow }
             );
             // #endregion
             setUser(null);
@@ -714,18 +919,45 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             code: (e as any)?.code ?? "unknown",
             message: (e as any)?.message ?? String(e),
             stack: (e as any)?.stack ? "present" : "absent",
-            screenBeforeCatch: screen,
+            screenBeforeCatch: screenNow,
+            fbUid: fbUser?.uid ?? null,
           }
           );
           // #endregion
           console.error("auth state change error:", e);
-          setUser(null);
-          // #region debug-point A/H1:observer-set-landing-from-catch
-          __DBG("A", "AppContext.observer:catch-setScreen-landing",
-            "observer catch setting screen=landing", { from: screen }
-          );
-          // #endregion
-          setScreen("landing");
+          if (fbUser) {
+            __DBG("A", "AppContext.observer:catch-fbuser-present",
+              "catch block: fbUser present, building fallback user instead of redirecting to landing",
+              { fbUid: fbUser.uid }
+            );
+            const fallback: User = {
+              id: fbUser.uid,
+              uid: fbUser.uid,
+              name: fbUser.displayName ?? fbUser.email?.split("@")[0] ?? "Student",
+              displayName: fbUser.displayName ?? fbUser.email?.split("@")[0] ?? "Student",
+              email: fbUser.email ?? "",
+              course: undefined,
+              semester: undefined,
+              subjects: [],
+              examDate: undefined,
+              dailyStudyTime: undefined,
+              createdAt: undefined,
+              updatedAt: undefined,
+            };
+            setUser(fallback);
+            if (screenNow === "landing" || screenNow === "login" || screenNow === "signup") {
+              setScreen("app");
+              setNav("dashboard");
+            }
+          } else {
+            setUser(null);
+            // #region debug-point A/H1:observer-set-landing-from-catch
+            __DBG("A", "AppContext.observer:catch-setScreen-landing",
+              "observer catch setting screen=landing (fbUser is null)", { from: screenNow }
+            );
+            // #endregion
+            setScreen("landing");
+          }
         } finally {
           // #region debug-point B:observer-finally
           __DBG("B", "AppContext.observer:finally",
@@ -738,8 +970,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return () => {
         // #region debug-point C:observer-unmounted
         __DBG("C", "AppContext.observer:unmount",
-          "observer unsubscribed (deps changed or component unmounting)",
-          { screen: screen }
+          "observer unsubscribed (fetchUserData changed or component unmounting)",
+          { screen: screenRef.current }
         );
         // #endregion
         unsub();
@@ -749,7 +981,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setAuthLoading(false);
       return undefined;
     }
-  }, [fetchUserData, screen, user, authLoading]);
+  }, [fetchUserData]);
 
   const value = useMemo<AppState>(
     () => ({

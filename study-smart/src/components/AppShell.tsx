@@ -38,10 +38,10 @@ function AuthLoadingScreen() {
   );
 }
 
-const SERVER = "http://127.0.0.1:7777/event";
-const SESSION = "login-blocked-after-valid-creds";
+const SERVER = "http://127.0.0.1:7788/event";
+const SESSION = "firestore-perm-denied";
 const RUN = "pre-fix";
-const __DBG_SHELL = (hyp, loc, msg, data = {}) => {
+const __DBG_SHELL = (hyp: string, loc: string, msg: string, data: Record<string, any> = {}) => {
   try {
     fetch(SERVER, {
       method: "POST",
